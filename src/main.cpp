@@ -4,6 +4,7 @@
 #include <dbt.h>
 #include <initguid.h>
 #include <hidclass.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -20,19 +21,35 @@ namespace {
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
+constexpr UINT WM_UPDATE_RESULT = WM_APP + 4;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
 constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
 constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 
-enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_LEFT_EDGE, ID_DEVICE_FIRST = 1000 };
+enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_LEFT_EDGE, ID_CHECK_UPDATE, ID_DEVICE_FIRST = 1000 };
 
 const wchar_t* kAppName = L"Wireless Battery";
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t* kRunValue = L"WirelessBattery";
 
 const wchar_t* kSettingsKey = L"Software\\WirelessBattery";
+
+// Version of this build, passed by the build as -DAPP_VERSION=1.2.3 (0.0.0 = development build).
+#ifndef APP_VERSION
+#define APP_VERSION 0.0.0
+#endif
+#define WSTR2(x) L"" #x
+#define WSTR(x) WSTR2(x)
+const wchar_t* kVersion = WSTR(APP_VERSION);
+
+// "Check for updates" asks GitHub for the newest release of the repository this build comes from.
+// It only runs when the user clicks it, and it never downloads or runs anything: it can open the
+// releases page below in the browser, nothing more.
+const wchar_t* kUpdateHost = L"api.github.com";
+const wchar_t* kUpdatePath = L"/repos/anas1412/Wireless-Device-Battery-Monitor/releases/latest";
+const wchar_t* kReleasesUrl = L"https://github.com/anas1412/Wireless-Device-Battery-Monitor/releases/latest";
 
 HINSTANCE g_inst;
 HWND g_hwnd;
@@ -460,6 +477,104 @@ void SetLeftEdge(bool on) {
     widget::SetLeftEdge(on);
 }
 
+// ---- update check -----------------------------------------------------------------------------
+
+struct UpdateResult {
+    bool ok = false;         // GitHub answered
+    bool noRelease = false;  // the repository has not published a release yet
+    std::wstring latest;     // e.g. "1.0.4"
+};
+volatile LONG g_updateBusy = 0;
+
+// HTTPS GET; returns the body (capped) and the HTTP status, or status 0 when the request failed.
+std::string HttpsGet(const wchar_t* host, const wchar_t* path, DWORD& status) {
+    status = 0;
+    std::string body;
+    HINTERNET ses = WinHttpOpen(L"WirelessBattery", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET con = ses ? WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
+    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    if (req) {
+        WinHttpSetTimeouts(req, 8000, 8000, 8000, 8000);
+        if (WinHttpSendRequest(req, L"Accept: application/vnd.github+json\r\n", (DWORD)-1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(req, nullptr)) {
+            DWORD code = 0, sz = sizeof(code);
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz,
+                                    WINHTTP_NO_HEADER_INDEX))
+                status = code;
+            char buf[4096];
+            DWORD n = 0;
+            while (body.size() < 512 * 1024 && WinHttpReadData(req, buf, sizeof(buf), &n) && n) body.append(buf, n);
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
+    return body;
+}
+
+UpdateResult QueryLatestRelease() {
+    UpdateResult r;
+    DWORD status = 0;
+    std::string body = HttpsGet(kUpdateHost, kUpdatePath, status);
+    if (status == 404) { r.ok = r.noRelease = true; return r; }
+    if (status != 200) return r;
+    size_t p = body.find("\"tag_name\"");
+    if (p != std::string::npos) p = body.find(':', p);
+    if (p != std::string::npos) p = body.find('"', p);
+    if (p == std::string::npos) return r;
+    // Keep only the dotted number; the text ends up in a message box.
+    for (size_t i = p + 1; i < body.size() && body[i] != '"' && r.latest.size() < 32; i++) {
+        char c = body[i];
+        if ((c >= '0' && c <= '9') || c == '.') r.latest.push_back((wchar_t)c);
+        else if (!r.latest.empty()) break;  // skips a leading "v", stops at any suffix
+    }
+    r.ok = !r.latest.empty();
+    return r;
+}
+
+// <0, 0, >0 like strcmp, comparing dotted numbers ("1.0.10" is newer than "1.0.9").
+int CompareVersions(const std::wstring& a, const std::wstring& b) {
+    const wchar_t *pa = a.c_str(), *pb = b.c_str();
+    for (int i = 0; i < 4; i++) {
+        wchar_t *ea, *eb;
+        long va = wcstol(pa, &ea, 10), vb = wcstol(pb, &eb, 10);
+        if (va != vb) return va < vb ? -1 : 1;
+        pa = *ea == L'.' ? ea + 1 : ea;
+        pb = *eb == L'.' ? eb + 1 : eb;
+    }
+    return 0;
+}
+
+DWORD WINAPI UpdateWorker(LPVOID) {
+    auto* r = new UpdateResult(QueryLatestRelease());
+    if (!PostMessageW(g_hwnd, WM_UPDATE_RESULT, 0, (LPARAM)r)) delete r;
+    return 0;
+}
+
+void CheckForUpdates() {
+    if (InterlockedExchange(&g_updateBusy, 1)) return;  // a check (or its message box) is already open
+    HANDLE t = CreateThread(nullptr, 0, UpdateWorker, nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
+    else InterlockedExchange(&g_updateBusy, 0);
+}
+
+void OnUpdateResult(const UpdateResult& r) {
+    std::wstring mine = kVersion;
+    const UINT base = MB_SETFOREGROUND | MB_TOPMOST;
+    if (!r.ok) {
+        MessageBoxW(g_hwnd, L"Could not check for updates. Check your internet connection and try again.", kAppName, base | MB_ICONWARNING);
+    } else if (r.noRelease) {
+        MessageBoxW(g_hwnd, (L"No release has been published yet.\nYou have version " + mine + L".").c_str(), kAppName, base | MB_ICONINFORMATION);
+    } else if (CompareVersions(r.latest, mine) > 0) {
+        std::wstring msg = L"Version " + r.latest + L" is available. You have version " + mine + L".\n\nOpen the download page?";
+        if (MessageBoxW(g_hwnd, msg.c_str(), kAppName, base | MB_ICONINFORMATION | MB_YESNO) == IDYES)
+            ShellExecuteW(nullptr, L"open", kReleasesUrl, nullptr, nullptr, SW_SHOWNORMAL);
+    } else {
+        MessageBoxW(g_hwnd, (L"You are up to date (version " + mine + L").").c_str(), kAppName, base | MB_ICONINFORMATION);
+    }
+    InterlockedExchange(&g_updateBusy, 0);
+}
+
 void ReAddAll() {
     g_placeholder = false;
     for (auto& [k, e] : g_entries) { e.added = false; ApplyEntry(e); }
@@ -479,6 +594,8 @@ void RedrawAll() {
 void ShowMenu() {
     HMENU m = CreatePopupMenu();
     std::vector<std::wstring> keys;  // menu id ID_DEVICE_FIRST + i -> device key
+    AppendMenuW(m, MF_STRING, ID_CHECK_UPDATE, (std::wstring(L"Check for updates  (version ") + kVersion + L")").c_str());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     if (g_entries.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
     else AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Click a device to show or hide it");
     for (auto& [k, e] : g_entries) {
@@ -513,6 +630,7 @@ void ShowMenu() {
         case ID_MODE_WIDGET: SetMode(true); break;
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_LEFT_EDGE: SetLeftEdge(!g_leftEdge); break;
+        case ID_CHECK_UPDATE: CheckForUpdates(); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_DEVICE_FIRST && cmd < ID_DEVICE_FIRST + keys.size()) {
@@ -565,6 +683,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_WIDGET_CLICK:
             ShowMenu();
             return 0;
+        case WM_UPDATE_RESULT: {
+            auto* r = reinterpret_cast<UpdateResult*>(lp);
+            OnUpdateResult(*r);
+            delete r;
+            return 0;
+        }
         case WM_ENDSESSION:  // sign-out / shutdown / installer restart manager
             if (wp) DestroyWindow(h);
             return 0;
@@ -685,6 +809,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
     // drain results posted after shutdown started
     while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<std::vector<DeviceStatus>*>(m.lParam);
+    while (PeekMessageW(&m, nullptr, WM_UPDATE_RESULT, WM_UPDATE_RESULT, PM_REMOVE)) delete reinterpret_cast<UpdateResult*>(m.lParam);
     if (notify) UnregisterDeviceNotification(notify);
     if (g_worker) CloseHandle(g_worker);
     ReleaseMutex(mutex);

@@ -4,7 +4,9 @@ WINDRES  ?= windres
 CXXFLAGS ?= -std=c++17 -Os -Wall -Wno-missing-field-initializers -ffunction-sections -fdata-sections \
             -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
 LDFLAGS  ?= -municode -mwindows -static -s -Wl,--gc-sections
-LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -lcomctl32 -lgdi32 -lruntimeobject
+LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -lcomctl32 -lgdi32 -lruntimeobject -lwinhttp
+# Shown in the menu and compared with the latest release by "Check for updates": make VERSION=1.2.3
+VERSION  ?= 0.0.0
 
 SRC := $(wildcard src/*.cpp) $(wildcard src/drivers/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
@@ -14,7 +16,7 @@ WirelessBattery.exe: $(OBJ)
 
 build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
+	$(CXX) $(CXXFLAGS) -DAPP_VERSION=$(VERSION) -municode -c $< -o $@
 
 build/app_res.o: res/app.rc res/app.manifest res/app.ico
 	@mkdir -p build

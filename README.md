@@ -19,11 +19,12 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 - **Charging:** a blue ⚡ appears next to the number.
 - **Asleep:** dimmed text means the device is asleep and the last known value is shown.
 - **Theme:** it follows light/dark mode and DPI scaling.
+- **Updates:** *Check for updates* at the top of the menu asks GitHub for the latest release and, if there is a newer one, offers to open its download page. It only runs when you click it, and it never downloads or installs anything by itself.
 - **Position:** tick *Place at the left edge of the taskbar* in the menu to move it to the far left. This needs Windows 11 with centered taskbar icons and the Widgets button turned off; otherwise the option is greyed out and the widget stays next to the notification area.
 
 **Tray icons:** one icon per device with the number drawn in it, plus a "Low battery" notification at 15%. The app switches to this automatically when the taskbar is vertical or can't be found.
 
-Hover for details. Click for the menu: every device (click one to hide or show it), display mode and position, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
+Hover for details. Click for the menu: every device (click one to hide or show it), *Check for updates*, display mode and position, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
 
 ## Supported devices
 
