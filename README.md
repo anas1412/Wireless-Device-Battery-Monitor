@@ -19,10 +19,11 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 - **Charging:** a blue ⚡ appears next to the number.
 - **Asleep:** dimmed text means the device is asleep and the last known value is shown.
 - **Theme:** it follows light/dark mode and DPI scaling.
+- **Position:** tick *Place at the left edge of the taskbar* in the menu to move it to the far left. This needs Windows 11 with centered taskbar icons and the Widgets button turned off; otherwise the option is greyed out and the widget stays next to the notification area.
 
 **Tray icons:** one icon per device with the number drawn in it, plus a "Low battery" notification at 15%. The app switches to this automatically when the taskbar is vertical or can't be found.
 
-Hover for details. Click for the menu: every device (click one to hide or show it), display mode, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
+Hover for details. Click for the menu: every device (click one to hide or show it), display mode and position, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
 
 ## Supported devices
 
@@ -114,7 +115,7 @@ just lose the extra headsets.
 
 Each vendor driver in [`src/drivers/`](src/drivers) recognises its devices by USB vendor and product ID, and only ever sends read-only battery queries. Unknown devices are never written to. The generic fallbacks (HID battery usage, Bluetooth, XInput, HeadsetControl) only look at devices no vendor driver has claimed.
 
-The taskbar widget is a layered child window of `Shell_TrayWnd`, placed left of `TrayNotifyWnd`. If Explorer restarts, it is re-created.
+The taskbar widget is a layered child window of `Shell_TrayWnd`, placed left of `TrayNotifyWnd` (or at the taskbar's left edge when that option is on). If Explorer restarts, it is re-created.
 
 ## Credits
 

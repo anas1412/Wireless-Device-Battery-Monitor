@@ -1,5 +1,5 @@
 #pragma once
-// A small transparent strip on the taskbar, just left of the notification area, showing
+// A small transparent strip on the taskbar, just left of the notification area (or at the taskbar's left edge), showing
 // "[icon] 30%  [icon] 93%". Implemented as a layered child window of the taskbar (Shell_TrayWnd).
 #include <windows.h>
 #include <string>
@@ -23,6 +23,10 @@ void Destroy();
 bool Alive();
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip);
 void SetLightTheme(bool light);
+// Puts the widget at the taskbar's left edge instead of beside the notification area.
+// Only honoured where that edge is free (see LeftEdgeAvailable); otherwise it stays by the tray.
+void SetLeftEdge(bool on);
+bool LeftEdgeAvailable();
 // Re-checks the taskbar layout and moves the widget if needed; call about once a second.
 // Returns false when the taskbar it was attached to is gone.
 bool Reposition();

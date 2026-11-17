@@ -7,11 +7,11 @@ namespace {
 
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
 UINT g_clickMsg;
-bool g_light, g_hover;
+bool g_light, g_hover, g_leftEdge;
 std::vector<WidgetItem> g_items;
 std::wstring g_tipText;
 RECT g_lastTray{}, g_lastBar{};
-int g_lastW = -1, g_lastDpi = 0;
+int g_lastW = -1, g_lastX = -1, g_lastDpi = 0;
 SIZE g_size{};
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
@@ -313,6 +313,23 @@ void SetLightTheme(bool light) {
     Paint();
 }
 
+void SetLeftEdge(bool on) {
+    g_leftEdge = on;
+    Reposition();
+}
+
+// The left edge is only free on Windows 11 with centered taskbar icons and the Widgets button off;
+// otherwise Start (or the Widgets button) lives there. Windows 10 always has Start on the left.
+bool LeftEdgeAvailable() {
+    if (!g_taskbar || g_rebar) return false;
+    const wchar_t* key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+    DWORD al = 1, da = 0, sz = sizeof(DWORD);
+    RegGetValueW(HKEY_CURRENT_USER, key, L"TaskbarAl", RRF_RT_REG_DWORD, nullptr, &al, &sz);
+    sz = sizeof(DWORD);
+    RegGetValueW(HKEY_CURRENT_USER, key, L"TaskbarDa", RRF_RT_REG_DWORD, nullptr, &da, &sz);
+    return al == 1 && da == 0;
+}
+
 bool Reposition() {
     if (!Alive()) return false;
     if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
@@ -323,7 +340,8 @@ bool Reposition() {
     GetWindowRect(g_taskbar, &bar);
     POINT p{ tr.left, bar.top };
     ScreenToClient(g_taskbar, &p);
-    int left = p.x - g_size.cx - Px(2);
+    bool atLeftEdge = g_leftEdge && LeftEdgeAvailable();
+    int left = atLeftEdge ? Px(4) : p.x - g_size.cx - Px(2);
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.
     if (g_rebar && IsWindow(g_rebar)) {
@@ -337,10 +355,12 @@ bool Reposition() {
 
     // Keep us above the taskbar's own content (our sibling windows).
     bool covered = GetWindow(g_wnd, GW_HWNDPREV) != nullptr;
-    if (!covered && EqualRect(&tr, &g_lastTray) && EqualRect(&bar, &g_lastBar) && g_lastW == g_size.cx) return true;
+    if (!covered && EqualRect(&tr, &g_lastTray) && EqualRect(&bar, &g_lastBar) && g_lastW == g_size.cx && g_lastX == left)
+        return true;
     g_lastTray = tr;
     g_lastBar = bar;
     g_lastW = g_size.cx;
+    g_lastX = left;
     SetWindowPos(g_wnd, HWND_TOP, left, 0, g_size.cx, g_size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     return true;
 }
