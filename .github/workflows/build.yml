@@ -24,7 +24,9 @@ jobs:
 
       - name: Build WirelessBattery.exe
         shell: msys2 {0}
-        run: make
+        # Release tags (v1.2.3) stamp their version into the exe; every other build stays 0.0.0.
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then make VERSION="${GITHUB_REF_NAME#v}"; else make; fi
 
       - name: Test Rapoo protocol and driver
         shell: msys2 {0}
