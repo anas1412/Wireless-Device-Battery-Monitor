@@ -6,7 +6,7 @@
 #      installer and creates the release that the app's "Check for updates" looks at
 #
 #   usage:  double-click release.cmd in the repository root, or run
-#           powershell -ExecutionPolicy Bypass -File scripts\release.ps1 [-DryRun]
+#           powershell -ExecutionPolicy Bypass -File scripts\release.ps1 [-DryRun] [-Yes]
 #
 # Each step is skipped when there is nothing to do, so it is safe to run at any time. It stops
 # without changing anything when there is uncommitted work, and leaves the rebase open for you to
@@ -15,7 +15,10 @@
 # Version scheme: <upstream version>.<fork build>, e.g. v1.0.4.1, v1.0.4.2, then v1.0.5.1 once the
 # fork sits on upstream 1.0.5. The upstream part is the newest upstream release that main contains;
 # the last number counts the fork's own releases on top of it.
-param([switch]$DryRun)
+#
+# -Yes answers every question with yes. It is for the weekly "sync upstream" workflow, which runs
+# this script unattended; a conflict still stops it.
+param([switch]$DryRun, [switch]$Yes)
 
 $UpstreamUrl = "git@github.com:krisgfx9/Wireless-Device-Battery-Monitor.git"
 $Branch = "main"
@@ -23,7 +26,10 @@ $Branch = "main"
 function Fail($msg) { Write-Host $msg -ForegroundColor Red; exit 1 }
 
 # Anything but a clear yes counts as no, including no input at all.
-function Confirm($question) { return "$(Read-Host "$question (y/n)")".Trim() -match '^(y|yes)$' }
+function Confirm($question) {
+    if ($Yes) { Write-Host "$question (y/n): yes (-Yes)"; return $true }
+    return "$(Read-Host "$question (y/n)")".Trim() -match '^(y|yes)$'
+}
 
 # Tags of a remote as name -> commit (annotated tags resolved to the commit they point at).
 function RemoteTags($remote) {
@@ -144,7 +150,8 @@ if (-not (Confirm "      Publish $tag as a public release on GitHub?")) {
     Write-Host "Nothing tagged."
     exit 0
 }
-git tag -a $tag -m "Wireless Battery $($tag.Substring(1))"
+# -f: the fork does not have this tag (checked above), so a local one is a leftover from a failed run.
+git tag -f -a $tag -m "Wireless Battery $($tag.Substring(1))"
 if ($LASTEXITCODE -ne 0) { Fail "Could not create the tag." }
 git push origin $tag
 if ($LASTEXITCODE -ne 0) { git tag -d $tag | Out-Null; Fail "Could not push the tag (removed it locally again)." }

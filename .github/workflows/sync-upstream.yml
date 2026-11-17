@@ -1,0 +1,49 @@
+name: sync upstream
+
+# Once a week: if the original repository has new commits, replay this fork's commits on top of
+# them, push main and publish the next release (scripts/release.ps1 -Yes). The installed app then
+# finds it through "Check for updates". When upstream and the fork changed the same lines the job
+# fails and GitHub mails the owner; run release.cmd locally to resolve it.
+#
+# Needs the repository secret SYNC_DEPLOY_KEY: the private half of a deploy key with write access.
+# The default GITHUB_TOKEN cannot do this job: its pushes do not start the build workflow, and it
+# may not push changes to workflow files.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to an exact commit, like the build workflow.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
+
+      - name: Look for new upstream commits
+        id: upstream
+        run: |
+          git remote add upstream https://github.com/krisgfx9/Wireless-Device-Battery-Monitor.git
+          git config remote.upstream.tagOpt --no-tags
+          git fetch upstream main
+          new=$(git rev-list --count main..upstream/main)
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "Upstream has $new new commit(s)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rebase, push and release
+        if: steps.upstream.outputs.new != '0'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/release.ps1 -Yes
