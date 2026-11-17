@@ -35,6 +35,7 @@ enum MenuId : UINT {
     ID_BRAND_COLORS, ID_STACKED,
     ID_LANG_AUTO = 400, ID_LANG_ADD, ID_LANG_FIRST,  // "Language": ID_LANG_FIRST + 0..63
     ID_MONITOR_ALL = 300, ID_MONITOR_MAIN, ID_MONITOR_FIRST,  // "Show the widget on": ID_MONITOR_FIRST + 0..31
+    ID_LEFT_EDGE = 200,  // fork: 200..299 is this fork's own range
     ID_DEVICE_FIRST = 1000
 };
 enum DeviceCmd : UINT { DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_STRIDE = 4 };
@@ -57,6 +58,7 @@ std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all"
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
 bool g_stacked = false;      // icon above the percentage (menu option)
 bool g_brandColors = false;  // off by default; known brands get their color (Razer green, Logitech blue, ...)
+bool g_leftEdge = false;       // taskbar widget at the taskbar's left edge instead of beside the tray
 
 struct TrayEntry {
     UINT uid = 0;
@@ -188,6 +190,8 @@ bool LoadStacked() { return LoadBoolSetting(L"StackedLayout", false); }
 void SaveStacked(bool on) { SaveBoolSetting(L"StackedLayout", on); }
 bool LoadBrandColors() { return LoadBoolSetting(L"BrandColors", false); }
 void SaveBrandColors(bool on) { SaveBoolSetting(L"BrandColors", on); }
+bool LoadLeftEdge() { return LoadBoolSetting(L"WidgetLeftEdge", false); }
+void SaveLeftEdge(bool on) { SaveBoolSetting(L"WidgetLeftEdge", on); }
 
 bool AutostartEnabled() {
     wchar_t buf[MAX_PATH * 2];
@@ -520,7 +524,10 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
     bool alive = g_wantWidget && widget::Alive();
-    if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
+    if (g_wantWidget && !alive) {
+        alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
+        if (alive) widget::SetLeftEdge(g_leftEdge);
+    }
     if (!g_wantWidget) widget::Destroy();
     bool changed = alive != g_useWidget;
     g_useWidget = alive;
@@ -551,6 +558,12 @@ void SetHideLastKnown(bool on) {
     for (auto& [k, e] : g_entries) ApplyEntry(e);
     UpdatePlaceholder();
     UpdateWidget();
+}
+
+void SetLeftEdge(bool on) {
+    g_leftEdge = on;
+    SaveLeftEdge(on);
+    widget::SetLeftEdge(on);
 }
 
 void ReAddAll() {
@@ -670,6 +683,10 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP | (g_wantWidget ? 0 : MF_GRAYED), (UINT_PTR)sub, T(L"Show the widget on"));
     }
     AppendMenuW(m, MF_STRING | (g_brandColors ? MF_CHECKED : 0), ID_BRAND_COLORS, T(L"Brand colors (Razer green, Logitech blue, ...)"));
+    // Greyed out where the left edge is taken (Windows 10, left-aligned icons, or the Widgets button).
+    bool leftOk = g_useWidget && widget::LeftEdgeAvailable();
+    AppendMenuW(m, MF_STRING | (g_leftEdge ? MF_CHECKED : 0) | (leftOk ? 0 : MF_GRAYED), ID_LEFT_EDGE,
+                L"Place at the left edge of the taskbar");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // Language: automatic, every built-in or user-added language (in its own name), and a way to add one.
     i18n::Init();  // picks up language files added since the last time
@@ -717,6 +734,7 @@ void ShowMenu() {
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_REPORT: report::Show(g_inst, g_hwnd); break;
+        case ID_LEFT_EDGE: SetLeftEdge(!g_leftEdge); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_LANG_FIRST && cmd < ID_LANG_FIRST + languages.size()) {
@@ -966,6 +984,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     i18n::Init();
     g_widgetMonitor = LoadWidgetMonitor();
     widget::SetMonitorChoice(g_widgetMonitor);
+    g_leftEdge = LoadLeftEdge();
     LoadHidden();
     LoadOrder();
     Reconcile();

@@ -40,6 +40,10 @@ struct MonitorOption {
 };
 // The monitors other than the main one that have a horizontal taskbar (empty with one monitor).
 std::vector<MonitorOption> OtherMonitors();
+// Puts the widget at the taskbar's left edge instead of beside the notification area.
+// Only honoured where that edge is free (see LeftEdgeAvailable); otherwise it stays by the tray.
+void SetLeftEdge(bool on);
+bool LeftEdgeAvailable();
 // Re-checks the taskbar layout and moves the widget if needed; call about once a second.
 // Returns false when the taskbar it was attached to is gone.
 bool Reposition();

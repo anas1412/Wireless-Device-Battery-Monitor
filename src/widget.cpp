@@ -12,6 +12,7 @@ namespace {
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
 UINT g_clickMsg;
 bool g_light, g_hover;
+bool g_leftEdge;    // fork: sit at the taskbar's left edge instead of beside the notification area
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
 bool g_stacked;     // icon above the percentage (menu option, PR #525)
 bool g_vertical;    // the primary taskbar is docked left or right: one block per device, stacked (PR #321)
@@ -917,6 +918,23 @@ std::vector<MonitorOption> OtherMonitors() {
     return out;
 }
 
+void SetLeftEdge(bool on) {
+    g_leftEdge = on;
+    Reposition();
+}
+
+// The left edge is only free on Windows 11 with centered taskbar icons and the Widgets button off;
+// otherwise Start (or the Widgets button) lives there. Windows 10 always has Start on the left.
+bool LeftEdgeAvailable() {
+    if (!g_taskbar || g_rebar) return false;
+    const wchar_t* key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+    DWORD al = 1, da = 0, sz = sizeof(DWORD);
+    RegGetValueW(HKEY_CURRENT_USER, key, L"TaskbarAl", RRF_RT_REG_DWORD, nullptr, &al, &sz);
+    sz = sizeof(DWORD);
+    RegGetValueW(HKEY_CURRENT_USER, key, L"TaskbarDa", RRF_RT_REG_DWORD, nullptr, &da, &sz);
+    return al == 1 && da == 0;
+}
+
 bool Reposition() {
     if (!Alive()) return false;
     SyncMirrors();
@@ -992,13 +1010,15 @@ bool Reposition() {
     ScreenToClient(g_taskbar, &p);
     int left = p.x - g_size.cx - Px(2);
 
-
     // Optional user override in DPI-independent pixels (e.g. for custom padding).
     DWORD customOffset = 0, sz = sizeof(customOffset);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset",
                      RRF_RT_REG_DWORD, nullptr, &customOffset, &sz) == ERROR_SUCCESS) {
         left -= Px((int)customOffset);
     }
+
+    // Fork: optional placement at the taskbar's left edge; the custom offset then pads from that edge.
+    if (g_leftEdge && LeftEdgeAvailable()) left = Px(4) + Px((int)customOffset);
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.
     if (g_rebar && IsWindow(g_rebar)) {
