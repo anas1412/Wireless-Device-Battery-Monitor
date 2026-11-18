@@ -6,7 +6,7 @@ The fork's own documentation lives in this file, not in `README.md`. The README 
 
 ## What it adds
 
-- **Check for updates:** the first entry in the menu, showing the installed version. It asks GitHub for this fork's latest release and, if there is a newer one, offers to install it: one click downloads the installer, checks it against the SHA-256 that GitHub published for it, installs it silently and restarts the app. It only runs when you click it and only downloads installers from this repository's releases. If anything fails, it offers the download page instead.
+- **Check for updates:** the first entry in the menu, showing the installed version. It asks GitHub for this fork's latest release and, if there is a newer one, offers to install it: one click downloads the installer (a notification says so), checks it against the SHA-256 that GitHub published for it, installs it with only a progress window and no questions, and restarts the app, which then confirms the new version in a notification. It only runs when you click it and only downloads installers from this repository's releases. If anything fails, it offers the download page instead.
 - **Widget position:** *Place at the left edge of the taskbar* in the menu moves the widget from beside the notification area to the far left. It is off by default. It needs Windows 11 with centered taskbar icons and the Widgets button turned off; otherwise the option is greyed out and the widget stays next to the notification area.
 
 Everything else is the original, unchanged.

@@ -683,6 +683,43 @@ UpdateResult QueryLatestRelease() {
     return r;
 }
 
+// Update notifications. In taskbar-widget mode the app has no tray icon to attach a Windows notification
+// to, so a temporary one carries them and is removed again afterwards.
+constexpr UINT UPDATE_NOTE_ID = 0x7F01;
+constexpr UINT_PTR TIMER_UPDATE_NOTE = 0x7F01;
+bool g_updateNote = false;
+
+void HideUpdateNote() {
+    KillTimer(g_hwnd, TIMER_UPDATE_NOTE);
+    if (g_updateNote) TrayDelete(UPDATE_NOTE_ID);
+    g_updateNote = false;
+}
+
+// hideAfterMs = 0 keeps it until HideUpdateNote (or the app closing).
+void ShowUpdateNote(const std::wstring& title, const std::wstring& text, UINT hideAfterMs) {
+    static HICON icon = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                          GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    NOTIFYICONDATAW nid{ sizeof(nid) };
+    nid.hWnd = g_hwnd;
+    nid.uID = UPDATE_NOTE_ID;
+    nid.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_INFO;
+    nid.hIcon = icon;
+    CopyTip(nid.szTip, ARRAYSIZE(nid.szTip), kAppName);
+    CopyTip(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), title);
+    CopyTip(nid.szInfo, ARRAYSIZE(nid.szInfo), text);
+    nid.dwInfoFlags = NIIF_INFO;
+    if (!g_updateNote) {
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+        g_updateNote = true;
+    } else {
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+    if (hideAfterMs) SetTimer(g_hwnd, TIMER_UPDATE_NOTE, hideAfterMs, nullptr);
+    else KillTimer(g_hwnd, TIMER_UPDATE_NOTE);
+}
+
 // Downloads an HTTPS URL to a file (redirects followed). Returns false with a reason on any failure.
 bool DownloadFile(const std::wstring& url, const std::wstring& path, std::wstring& error) {
     URL_COMPONENTS uc{ sizeof(uc) };
@@ -823,24 +860,30 @@ void OnUpdateResult(const UpdateResult& r) {
                            L".\n\nDownload and install it now? Wireless Battery restarts by itself when it is done.";
         if (MessageBoxW(g_hwnd, msg.c_str(), kAppName, kBoxFlags | MB_ICONINFORMATION | MB_YESNO) == IDYES) {
             HANDLE t = CreateThread(nullptr, 0, InstallWorker, new UpdateResult(r), 0, nullptr);
-            if (t) { CloseHandle(t); return; }  // still busy until the download finishes
+            if (t) {
+                CloseHandle(t);
+                ShowUpdateNote(L"Downloading update", L"Downloading Wireless Battery " + r.latest + L"...", 0);
+                return;  // still busy until the download finishes
+            }
             OfferReleasePage(L"Could not start the download.");
         }
     }
     InterlockedExchange(&g_updateBusy, 0);
 }
 
-// The installer is verified; run it silently. It closes this app, installs over it, and starts the new
-// version (/LAUNCH=1, see installer\WirelessBattery.iss).
+// The installer is verified; run it without questions. /SILENT shows only its progress window. It closes
+// this app, installs over it, and starts the new version (/LAUNCH=1, see installer\WirelessBattery.iss),
+// which then says it was updated (--updated).
 void OnInstallResult(const InstallResult& r) {
     InterlockedExchange(&g_updateBusy, 0);
+    HideUpdateNote();
     if (!r.ok) { OfferReleasePage(r.error); return; }
     SHELLEXECUTEINFOW sei{ sizeof(sei) };
     sei.fMask = SEE_MASK_NOASYNC;
     sei.hwnd = g_hwnd;
     sei.lpVerb = L"open";
     sei.lpFile = r.path.c_str();
-    sei.lpParameters = L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LAUNCH=1";
+    sei.lpParameters = L"/SILENT /SUPPRESSMSGBOXES /NORESTART /LAUNCH=1";
     sei.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&sei)) OfferReleasePage(L"Could not start the installer.");
 }
@@ -1139,6 +1182,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
             if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_UPDATE_NOTE) HideUpdateNote();  // fork
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -1148,6 +1192,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             KillTimer(h, TIMER_WIDGET);
+            HideUpdateNote();  // fork
             widget::Destroy();
             SetEvent(g_stopEvt);
             if (g_worker) WaitForSingleObject(g_worker, 5000);
@@ -1285,6 +1330,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
+    // Fork: started by the installer after "Check for updates" installed this version.
+    if (cmdLine && wcsstr(cmdLine, L"--updated"))
+        ShowUpdateNote(L"Wireless Battery updated", std::wstring(L"Now running version ") + kVersion + L".", 15000);
     g_worker = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
 
     MSG m;
