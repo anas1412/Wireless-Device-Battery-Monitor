@@ -5,6 +5,7 @@
 #include <initguid.h>
 #include <hidclass.h>
 #include <winhttp.h>
+#include <wincrypt.h>
 
 #include <algorithm>
 #include <climits>
@@ -25,7 +26,8 @@ namespace {
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
-constexpr UINT WM_UPDATE_RESULT = WM_APP + 4;
+constexpr UINT WM_UPDATE_RESULT = WM_APP + 4;   // fork: update check finished
+constexpr UINT WM_UPDATE_INSTALL = WM_APP + 5;  // fork: update downloaded and verified (or failed)
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
 constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
@@ -589,8 +591,17 @@ struct UpdateResult {
     bool ok = false;         // GitHub answered
     bool noRelease = false;  // the repository has not published a release yet
     std::wstring latest;     // e.g. "1.0.4"
+    std::wstring setupUrl;   // the release's installer, empty when it has none
+    std::string sha256;      // its SHA-256 as GitHub reports it (64 lowercase hex digits)
+};
+struct InstallResult {
+    bool ok = false;
+    std::wstring path;   // the downloaded, verified installer
+    std::wstring error;  // what went wrong otherwise
 };
 volatile LONG g_updateBusy = 0;
+// Only installers from this repository's own releases are ever downloaded.
+const wchar_t* kDownloadPrefix = L"https://github.com/anas1412/Wireless-Device-Battery-Monitor/releases/download/";
 
 // HTTPS GET; returns the body (capped) and the HTTP status, or status 0 when the request failed.
 std::string HttpsGet(const wchar_t* host, const wchar_t* path, DWORD& status) {
@@ -618,23 +629,141 @@ std::string HttpsGet(const wchar_t* host, const wchar_t* path, DWORD& status) {
     return body;
 }
 
+// The string value of the first "key" at or after `from` in GitHub's JSON, and where it ends.
+// Values containing escapes are rejected (returned empty): none of the fields read here have any.
+std::string JsonString(const std::string& body, const char* key, size_t from, size_t* end = nullptr) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = body.find(k, from);
+    if (p == std::string::npos) return {};
+    p += k.size();
+    while (p < body.size() && (body[p] == ' ' || body[p] == ':' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) p++;
+    if (p >= body.size() || body[p] != '"') return {};
+    size_t q = body.find('"', p + 1);
+    if (q == std::string::npos) return {};
+    std::string v = body.substr(p + 1, q - p - 1);
+    if (end) *end = q;
+    return v.find('\\') == std::string::npos ? v : std::string();
+}
+
 UpdateResult QueryLatestRelease() {
     UpdateResult r;
     DWORD status = 0;
     std::string body = HttpsGet(kUpdateHost, kUpdatePath, status);
     if (status == 404) { r.ok = r.noRelease = true; return r; }
     if (status != 200) return r;
-    size_t p = body.find("\"tag_name\"");
-    if (p != std::string::npos) p = body.find(':', p);
-    if (p != std::string::npos) p = body.find('"', p);
-    if (p == std::string::npos) return r;
-    // Keep only the dotted number; the text ends up in a message box.
-    for (size_t i = p + 1; i < body.size() && body[i] != '"' && r.latest.size() < 32; i++) {
-        char c = body[i];
+    // Keep only the dotted number of the tag; the text ends up in a message box.
+    for (char c : JsonString(body, "tag_name", 0)) {
         if ((c >= '0' && c <= '9') || c == '.') r.latest.push_back((wchar_t)c);
         else if (!r.latest.empty()) break;  // skips a leading "v", stops at any suffix
+        if (r.latest.size() > 32) break;
     }
     r.ok = !r.latest.empty();
+    // The installer asset: its download link and the SHA-256 GitHub computed when it was uploaded.
+    // Within one asset, "name" comes before "digest", which comes before "browser_download_url".
+    for (size_t at = 0;;) {
+        size_t nameEnd = 0;
+        std::string name = JsonString(body, "name", at, &nameEnd);
+        if (name.empty() && nameEnd == 0) break;
+        at = nameEnd + 1;
+        if (name.rfind("WirelessBattery-Setup-", 0) != 0 || name.size() < 5 || name.compare(name.size() - 4, 4, ".exe") != 0) continue;
+        size_t urlEnd = 0;
+        std::string url = JsonString(body, "browser_download_url", at, &urlEnd);
+        size_t digestEnd = 0;
+        std::string digest = JsonString(body, "digest", at, &digestEnd);
+        if (digestEnd > urlEnd) digest.clear();  // belongs to a later asset
+        std::wstring wurl(url.begin(), url.end());
+        bool hex = digest.size() == 7 + 64 && digest.rfind("sha256:", 0) == 0 &&
+                   digest.find_first_not_of("0123456789abcdef", 7) == std::string::npos;
+        if (hex && wurl.rfind(kDownloadPrefix, 0) == 0) {
+            r.setupUrl = wurl;
+            r.sha256 = digest.substr(7);
+        }
+        break;
+    }
+    return r;
+}
+
+// Downloads an HTTPS URL to a file (redirects followed). Returns false with a reason on any failure.
+bool DownloadFile(const std::wstring& url, const std::wstring& path, std::wstring& error) {
+    URL_COMPONENTS uc{ sizeof(uc) };
+    wchar_t host[256] = {}, urlPath[2048] = {};
+    uc.lpszHostName = host;
+    uc.dwHostNameLength = ARRAYSIZE(host);
+    uc.lpszUrlPath = urlPath;
+    uc.dwUrlPathLength = ARRAYSIZE(urlPath);
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) { error = L"Bad download link."; return false; }
+    bool ok = false;
+    HINTERNET ses = WinHttpOpen(L"WirelessBattery", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET con = ses ? WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
+    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", urlPath, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    error = L"Could not download the update. Check your internet connection and try again.";
+    if (req) {
+        WinHttpSetTimeouts(req, 10000, 10000, 15000, 30000);
+        DWORD code = 0, sz = sizeof(code);
+        if (WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr) &&
+            WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz,
+                                WINHTTP_NO_HEADER_INDEX) && code == 200) {
+            HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f != INVALID_HANDLE_VALUE) {
+                char buf[64 * 1024];
+                DWORD n = 0, written = 0;
+                unsigned long long total = 0;
+                ok = true;
+                while (ok && WinHttpReadData(req, buf, sizeof(buf), &n) && n) {
+                    total += n;
+                    ok = total < 256ull * 1024 * 1024 && WriteFile(f, buf, n, &written, nullptr) && written == n;
+                }
+                ok = ok && total > 0;
+                CloseHandle(f);
+                if (!ok) DeleteFileW(path.c_str());
+            }
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
+    if (ok) error.clear();
+    return ok;
+}
+
+// SHA-256 of a file as 64 lowercase hex digits, or empty on failure.
+std::string Sha256OfFile(const std::wstring& path) {
+    std::string hex;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE && CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+        CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hash)) {
+        BYTE buf[64 * 1024];
+        DWORD n = 0;
+        bool ok = true;
+        while (ok && ReadFile(f, buf, sizeof(buf), &n, nullptr) && n) ok = CryptHashData(hash, buf, n, 0) != FALSE;
+        BYTE digest[32];
+        DWORD len = sizeof(digest);
+        if (ok && CryptGetHashParam(hash, HP_HASHVAL, digest, &len, 0) && len == 32)
+            for (BYTE b : digest) { const char* d = "0123456789abcdef"; hex += d[b >> 4]; hex += d[b & 15]; }
+    }
+    if (hash) CryptDestroyHash(hash);
+    if (prov) CryptReleaseContext(prov, 0);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    return hex;
+}
+
+// Downloads the release's installer to %TEMP%\WirelessBattery-Update and checks it against GitHub's SHA-256.
+InstallResult DownloadUpdate(const UpdateResult& u) {
+    InstallResult r;
+    wchar_t tmp[MAX_PATH] = {};
+    if (!GetTempPathW(MAX_PATH, tmp)) { r.error = L"No temporary folder."; return r; }
+    std::wstring dir = std::wstring(tmp) + L"WirelessBattery-Update";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    r.path = dir + L"\\WirelessBattery-Setup-" + u.latest + L".exe";
+    if (!DownloadFile(u.setupUrl, r.path, r.error)) return r;
+    if (Sha256OfFile(r.path) != u.sha256) {
+        DeleteFileW(r.path.c_str());
+        r.error = L"The downloaded update did not match its published checksum, so it was deleted and not installed.";
+        return r;
+    }
+    r.ok = true;
     return r;
 }
 
@@ -664,21 +793,56 @@ void CheckForUpdates() {
     else InterlockedExchange(&g_updateBusy, 0);
 }
 
+DWORD WINAPI InstallWorker(LPVOID p) {
+    auto* u = static_cast<UpdateResult*>(p);
+    auto* r = new InstallResult(DownloadUpdate(*u));
+    delete u;
+    if (!PostMessageW(g_hwnd, WM_UPDATE_INSTALL, 0, (LPARAM)r)) delete r;
+    return 0;
+}
+
+const UINT kBoxFlags = MB_SETFOREGROUND | MB_TOPMOST;
+
+void OfferReleasePage(const std::wstring& why) {
+    if (MessageBoxW(g_hwnd, (why + L"\n\nOpen the download page instead?").c_str(), kAppName, kBoxFlags | MB_ICONWARNING | MB_YESNO) == IDYES)
+        ShellExecuteW(nullptr, L"open", kReleasesUrl, nullptr, nullptr, SW_SHOWNORMAL);
+}
+
 void OnUpdateResult(const UpdateResult& r) {
     std::wstring mine = kVersion;
-    const UINT base = MB_SETFOREGROUND | MB_TOPMOST;
     if (!r.ok) {
-        MessageBoxW(g_hwnd, L"Could not check for updates. Check your internet connection and try again.", kAppName, base | MB_ICONWARNING);
+        MessageBoxW(g_hwnd, L"Could not check for updates. Check your internet connection and try again.", kAppName, kBoxFlags | MB_ICONWARNING);
     } else if (r.noRelease) {
-        MessageBoxW(g_hwnd, (L"No release has been published yet.\nYou have version " + mine + L".").c_str(), kAppName, base | MB_ICONINFORMATION);
-    } else if (CompareVersions(r.latest, mine) > 0) {
-        std::wstring msg = L"Version " + r.latest + L" is available. You have version " + mine + L".\n\nOpen the download page?";
-        if (MessageBoxW(g_hwnd, msg.c_str(), kAppName, base | MB_ICONINFORMATION | MB_YESNO) == IDYES)
-            ShellExecuteW(nullptr, L"open", kReleasesUrl, nullptr, nullptr, SW_SHOWNORMAL);
+        MessageBoxW(g_hwnd, (L"No release has been published yet.\nYou have version " + mine + L".").c_str(), kAppName, kBoxFlags | MB_ICONINFORMATION);
+    } else if (CompareVersions(r.latest, mine) <= 0) {
+        MessageBoxW(g_hwnd, (L"You are up to date (version " + mine + L").").c_str(), kAppName, kBoxFlags | MB_ICONINFORMATION);
+    } else if (r.setupUrl.empty()) {
+        OfferReleasePage(L"Version " + r.latest + L" is available, but its installer cannot be checked automatically.");
     } else {
-        MessageBoxW(g_hwnd, (L"You are up to date (version " + mine + L").").c_str(), kAppName, base | MB_ICONINFORMATION);
+        std::wstring msg = L"Version " + r.latest + L" is available. You have version " + mine +
+                           L".\n\nDownload and install it now? Wireless Battery restarts by itself when it is done.";
+        if (MessageBoxW(g_hwnd, msg.c_str(), kAppName, kBoxFlags | MB_ICONINFORMATION | MB_YESNO) == IDYES) {
+            HANDLE t = CreateThread(nullptr, 0, InstallWorker, new UpdateResult(r), 0, nullptr);
+            if (t) { CloseHandle(t); return; }  // still busy until the download finishes
+            OfferReleasePage(L"Could not start the download.");
+        }
     }
     InterlockedExchange(&g_updateBusy, 0);
+}
+
+// The installer is verified; run it silently. It closes this app, installs over it, and starts the new
+// version (/LAUNCH=1, see installer\WirelessBattery.iss).
+void OnInstallResult(const InstallResult& r) {
+    InterlockedExchange(&g_updateBusy, 0);
+    if (!r.ok) { OfferReleasePage(r.error); return; }
+    SHELLEXECUTEINFOW sei{ sizeof(sei) };
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.hwnd = g_hwnd;
+    sei.lpVerb = L"open";
+    sei.lpFile = r.path.c_str();
+    sei.lpParameters = L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LAUNCH=1";
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei)) OfferReleasePage(L"Could not start the installer.");
 }
 
 void ReAddAll() {
@@ -957,6 +1121,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             delete r;
             return 0;
         }
+        case WM_UPDATE_INSTALL: {
+            auto* r = reinterpret_cast<InstallResult*>(lp);
+            OnInstallResult(*r);
+            delete r;
+            return 0;
+        }
         case WM_ENDSESSION:  // sign-out / shutdown / installer restart manager
             if (wp) DestroyWindow(h);
             return 0;
@@ -1126,6 +1296,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     // drain results posted after shutdown started
     while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<std::vector<DeviceStatus>*>(m.lParam);
     while (PeekMessageW(&m, nullptr, WM_UPDATE_RESULT, WM_UPDATE_RESULT, PM_REMOVE)) delete reinterpret_cast<UpdateResult*>(m.lParam);
+    while (PeekMessageW(&m, nullptr, WM_UPDATE_INSTALL, WM_UPDATE_INSTALL, PM_REMOVE)) delete reinterpret_cast<InstallResult*>(m.lParam);
     if (notify) UnregisterDeviceNotification(notify);
     if (g_worker) CloseHandle(g_worker);
     ReleaseMutex(mutex);

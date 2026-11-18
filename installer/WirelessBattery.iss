@@ -47,6 +47,8 @@ Name: "{autoprograms}\Wireless Battery"; Filename: "{app}\WirelessBattery.exe"
 [Run]
 Filename: "{app}\WirelessBattery.exe"; Description: "Start Wireless Battery now"; Flags: nowait postinstall skipifsilent
 Filename: "https://ko-fi.com/krisgfx"; Description: "Enjoying Wireless Battery? Support it on Ko-fi"; Flags: shellexec postinstall unchecked skipifsilent nowait runasoriginaluser
+; Fork: the app's "Check for updates" runs this setup silently with /LAUNCH=1; start the new version afterwards.
+Filename: "{app}\WirelessBattery.exe"; Flags: nowait; Check: LaunchAfterUpdate
 
 [UninstallRun]
 Filename: "{app}\WirelessBattery.exe"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"
@@ -54,6 +56,12 @@ Filename: "{app}\WirelessBattery.exe"; Parameters: "--quit"; Flags: runhidden wa
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+
+{ Fork: true when the app's own updater started this setup (see [Run]). }
+function LaunchAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:LAUNCH|0}') = '1');
+end;
 
 procedure QuitRunningApp();
 var
