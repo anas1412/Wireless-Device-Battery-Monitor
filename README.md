@@ -1,3 +1,5 @@
+> **This is a fork** with two additions: a *Check for updates* menu entry and an option to place the widget at the left edge of the taskbar. Get this fork's builds from [its releases](https://github.com/anas1412/Wireless-Device-Battery-Monitor/releases/latest); the download links further down point at the original. Details in [FORK.md](FORK.md).
+
 # Wireless Battery
 
 [![Support me on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/krisgfx)
